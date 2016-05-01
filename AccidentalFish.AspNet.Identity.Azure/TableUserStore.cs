@@ -18,7 +18,7 @@ namespace AccidentalFish.AspNet.Identity.Azure
         IUserSecurityStampStore<T>,
         IUserStore<T>,
         // 2.0 interfaces
-        //IQueryableUserStore<T>,
+        IQueryableUserStore<T>,
         IUserEmailStore<T>,
         IUserPhoneNumberStore<T>,
         IUserTwoFactorStore<T, string>,
@@ -743,8 +743,40 @@ namespace AccidentalFish.AspNet.Identity.Azure
         }
 
         #region 2.0 interface implemenation
+        public IQueryable<T> Users
+        {
+            get
+            {
+                IEnumerable<T> users = _userTable.ExecuteQuery<T>(new TableQuery<T>());
 
-        //public IQueryable<T> Users { get; private set; }
+                foreach (var u in users)
+                {
+                    u.LazyLoginEvaluator = () =>
+                    {
+                        Task<IList<UserLoginInfo>> loginInfoTask = GetLoginsAsync(u);
+                        loginInfoTask.Wait();
+                        IList<UserLoginInfo> loginInfo = loginInfoTask.Result;
+                        return loginInfo.Select(x => new TableUserLogin(u.Id, x.LoginProvider, x.ProviderKey));
+                    };
+                    u.LazyClaimsEvaluator = () =>
+                    {
+                        Task<IList<Claim>> claimTask = GetClaimsAsync(u);
+                        claimTask.Wait();
+                        IList<Claim> loginInfo = claimTask.Result;
+                        return loginInfo.Select(x => new TableUserClaim(u.Id, x.Type, x.Value));
+                    };
+                    u.LazyRolesEvaluator = () =>
+                    {
+                        Task<IList<string>> roleTask = GetRolesAsync(u);
+                        roleTask.Wait();
+                        IList<string> roles = roleTask.Result;
+                        return roles.Select(x => new TableUserRole(u.Id, x));
+                    };
+                }
+
+                return users.AsQueryable<T>();
+            }
+        }
 
         public Task SetEmailAsync(T user, string email)
         {
