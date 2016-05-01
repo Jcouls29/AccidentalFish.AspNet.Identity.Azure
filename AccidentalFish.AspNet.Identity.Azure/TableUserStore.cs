@@ -689,17 +689,17 @@ namespace AccidentalFish.AspNet.Identity.Azure
             while (querySegment == null || querySegment.ContinuationToken != null)
             {
                 querySegment = await _rolesTable.ExecuteQuerySegmentedAsync(query, querySegment != null ? querySegment.ContinuationToken : null);
-                claims.AddRange(querySegment.Results.Select(x => x.Name));
+                roles.AddRange(querySegment.Results.Select(x => x.Name));
             }
 
-            return claims;
+            return roles;
         }
 
         public async Task<bool> IsInRoleAsync(T user, string role)
         {
             if (user == null) throw new ArgumentNullException("user");
             if (String.IsNullOrWhiteSpace(role)) throw new ArgumentNullException("role");
-            TableOperation operation = TableOperation.Retrieve(user.Id, role);
+            TableOperation operation = TableOperation.Retrieve(user.Id, role.Base64Encode());
             return (await _rolesTable.ExecuteAsync(operation)).Result != null;
         }
 
