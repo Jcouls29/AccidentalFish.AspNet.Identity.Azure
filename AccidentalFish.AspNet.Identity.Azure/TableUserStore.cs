@@ -231,55 +231,50 @@ namespace AccidentalFish.AspNet.Identity.Azure
 
         private async Task RemoveIndices(T user)
         {
-            TableUserIdIndex userIdIndex = new TableUserIdIndex(user.UserName.Base64Encode(),user.Id);
+            TableUserIdIndex userIdIndex = new TableUserIdIndex(user.UserName.Base64Encode(), user.Id);
             userIdIndex.ETag = "*";
-            TableUserEmailIndex emailIndex = new TableUserEmailIndex(user.Email.Base64Encode(),user.Id);
-            emailIndex.ETag = "*";
+            await _userIndexTable.ExecuteAsync(TableOperation.Delete(userIdIndex));
 
-            Task t1 = _userIndexTable.ExecuteAsync(TableOperation.Delete(userIdIndex));
-            Task t2 = _userEmailIndexTable.ExecuteAsync(TableOperation.Delete(emailIndex));
-
-            await Task.WhenAll(t1, t2);
+            if (!string.IsNullOrWhiteSpace(user.Email))
+            {
+                TableUserEmailIndex emailIndex = new TableUserEmailIndex(user.Email.Base64Encode(), user.Id);
+                emailIndex.ETag = "*";
+                await _userEmailIndexTable.ExecuteAsync(TableOperation.Delete(emailIndex));
+            }
         }
 
         public Task<T> FindByIdAsync(string userId)
         {
             if (String.IsNullOrWhiteSpace(userId)) throw new ArgumentNullException("userId");
-            return Task.Factory.StartNew(() =>
+
+            TableQuery<T> query =
+                new TableQuery<T>().Where(
+                    TableQuery.GenerateFilterCondition("PartitionKey",
+                        QueryComparisons.Equal, userId)).Take(1);
+
+            IEnumerable<T> results = _userTable.ExecuteQuery(query);
+
+            T result = results.SingleOrDefault();
+            if (result != null)
             {
-                TableQuery<T> query =
-                    new TableQuery<T>().Where(
-                        TableQuery.GenerateFilterCondition("PartitionKey",
-                            QueryComparisons.Equal, userId)).Take(1);
-                IEnumerable<T> results = _userTable.ExecuteQuery(query);
-                T result = results.SingleOrDefault();
-                if (result != null)
+                result.LazyLoginEvaluator = () =>
                 {
-                    result.LazyLoginEvaluator = () =>
-                    {
-                        Task<IList<UserLoginInfo>> loginInfoTask = GetLoginsAsync(result);
-                        loginInfoTask.Wait();
-                        IList<UserLoginInfo> loginInfo = loginInfoTask.Result;
-                        return loginInfo.Select(x => new TableUserLogin(result.Id, x.LoginProvider, x.ProviderKey));
-                    };
-                    result.LazyClaimsEvaluator = () =>
-                    {
-                        Task<IList<Claim>> claimTask = GetClaimsAsync(result);
-                        claimTask.Wait();
-                        IList<Claim> loginInfo = claimTask.Result;
-                        return loginInfo.Select(x => new TableUserClaim(result.Id, x.Type, x.Value));
-                    };
-                    result.LazyRolesEvaluator = () =>
-                    {
-                        Task<IList<string>> roleTask = GetRolesAsync(result);
-                        roleTask.Wait();
-                        IList<string> roles = roleTask.Result;
-                        return roles.Select(x => new TableUserRole(result.Id, x));
-                    };
-                }
+                    IList<UserLoginInfo> loginInfo = GetLogins(result);
+                    return loginInfo.Select(x => new TableUserLogin(result.Id, x.LoginProvider, x.ProviderKey));
+                };
+                result.LazyClaimsEvaluator = () =>
+                {
+                    IList<Claim> loginInfo = GetClaims(result);
+                    return loginInfo.Select(x => new TableUserClaim(result.Id, x.Type, x.Value));
+                };
+                result.LazyRolesEvaluator = () =>
+                {
+                    IList<string> roles = GetRoles(result);
+                    return roles.Select(x => new TableUserRole(result.Id, x));
+                };
+            }
                 
-                return result;
-            });
+            return Task.FromResult(result);
         }
 
         public Task<T> FindByNameAsync(string userName)
@@ -458,6 +453,17 @@ namespace AccidentalFish.AspNet.Identity.Azure
             });
         }
 
+        public IList<UserLoginInfo> GetLogins(T user)
+        {
+            if (user == null) throw new ArgumentNullException("user");
+            TableQuery<TableUserLogin> query =
+                new TableQuery<TableUserLogin>().Where(
+                    TableQuery.GenerateFilterCondition("PartitionKey",
+                        QueryComparisons.Equal, user.Id)).Take(1);
+            IEnumerable<TableUserLogin> results = _loginTable.ExecuteQuery(query);
+            return (IList<UserLoginInfo>)results.Select(x => new UserLoginInfo(x.LoginProvider, x.ProviderKey)).ToList();
+        }
+
         public async Task<T> FindAsync(UserLoginInfo login)
         {
             if (login == null) throw new ArgumentNullException("login");
@@ -482,6 +488,24 @@ namespace AccidentalFish.AspNet.Identity.Azure
             while (querySegment == null || querySegment.ContinuationToken != null)
             {
                 querySegment = await _claimsTable.ExecuteQuerySegmentedAsync(query, querySegment != null ? querySegment.ContinuationToken : null);
+                claims.AddRange(querySegment.Results.Select(x => new Claim(x.ClaimType, x.ClaimValue)));
+            }
+
+            return claims;
+        }
+
+        public IList<Claim> GetClaims(T user)
+        {
+            if (user == null) throw new ArgumentNullException();
+
+            List<Claim> claims = new List<Claim>();
+            string partitionKeyQuery = TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, user.Id);
+            TableQuery<TableUserClaim> query = new TableQuery<TableUserClaim>().Where(partitionKeyQuery);
+            TableQuerySegment<TableUserClaim> querySegment = null;
+
+            while (querySegment == null || querySegment.ContinuationToken != null)
+            {
+                querySegment = _claimsTable.ExecuteQuerySegmented(query, querySegment != null ? querySegment.ContinuationToken : null);
                 claims.AddRange(querySegment.Results.Select(x => new Claim(x.ClaimType, x.ClaimValue)));
             }
 
@@ -677,11 +701,29 @@ namespace AccidentalFish.AspNet.Identity.Azure
             }
         }
 
+        public IList<string> GetRoles(T user)
+        {
+            if (user == null) throw new ArgumentNullException();
+
+            List<string> roles = new List<string>();
+            string partitionKeyQuery = TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, user.Id);
+            TableQuery<TableUserRole> query = new TableQuery<TableUserRole>().Where(partitionKeyQuery);
+            TableQuerySegment<TableUserRole> querySegment = null;
+
+            while (querySegment == null || querySegment.ContinuationToken != null)
+            {
+                querySegment = _rolesTable.ExecuteQuerySegmented(query, querySegment != null ? querySegment.ContinuationToken : null);
+                roles.AddRange(querySegment.Results.Select(x => x.Name));
+            }
+
+            return roles;
+        }
+
         public async Task<IList<string>> GetRolesAsync(T user)
         {
             if (user == null) throw new ArgumentNullException();
 
-            List<string> claims = new List<string>();
+            List<string> roles = new List<string>();
             string partitionKeyQuery = TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, user.Id);
             TableQuery<TableUserRole> query = new TableQuery<TableUserRole>().Where(partitionKeyQuery);
             TableQuerySegment<TableUserRole> querySegment = null;
@@ -747,29 +789,24 @@ namespace AccidentalFish.AspNet.Identity.Azure
         {
             get
             {
-                IEnumerable<T> users = _userTable.ExecuteQuery<T>(new TableQuery<T>());
+                IEnumerable<T> users = _userTable.ExecuteQuery<T>(new TableQuery<T>()).ToArray();
 
-                foreach (var u in users)
+                foreach (T u in users)
                 {
                     u.LazyLoginEvaluator = () =>
                     {
-                        Task<IList<UserLoginInfo>> loginInfoTask = GetLoginsAsync(u);
-                        loginInfoTask.Wait();
-                        IList<UserLoginInfo> loginInfo = loginInfoTask.Result;
+                        IList<UserLoginInfo> loginInfo = GetLogins(u);
                         return loginInfo.Select(x => new TableUserLogin(u.Id, x.LoginProvider, x.ProviderKey));
                     };
                     u.LazyClaimsEvaluator = () =>
                     {
-                        Task<IList<Claim>> claimTask = GetClaimsAsync(u);
-                        claimTask.Wait();
-                        IList<Claim> loginInfo = claimTask.Result;
+                        IList<Claim> loginInfo = GetClaims(u);
                         return loginInfo.Select(x => new TableUserClaim(u.Id, x.Type, x.Value));
                     };
                     u.LazyRolesEvaluator = () =>
                     {
-                        Task<IList<string>> roleTask = GetRolesAsync(u);
-                        roleTask.Wait();
-                        IList<string> roles = roleTask.Result;
+                        //Task<IList<string>> roleTask = GetRolesAsync(u);
+                        IList<string> roles = GetRoles(u);
                         return roles.Select(x => new TableUserRole(u.Id, x));
                     };
                 }
